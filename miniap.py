@@ -4,7 +4,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 router = Router()
-APP_URL = "https://ТВОЙ_ЛОГИН.github.io/mirus-app/"
+APP_URL = "https://@mirus_ai_bot.github.io/mirus-app/"
 
 @router.message(Command("app"))
 async def cmd_app(message: types.Message):
