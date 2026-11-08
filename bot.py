@@ -19,8 +19,8 @@ import calc as calculator
 # ==========================================
 # НАСТРОЙКИ (берутся из Environment на Render)
 # ==========================================
-TOKEN = os.environ["8644786361:AAEwDgQxc-DUJ5i2E2M-E6ChiocPHeT3pUi8"]
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "7306883771"))
+TOKEN = os.environ["8644786361:AAEUOqcMU73tb3rras3QCC3VLI10tK-_m38"]
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "7306883775"))
 MINI_APP_URL = os.environ.get("MINI_APP_URL", "https://mirus-app.onrender.com")
 DB = "mirus_knowledge.db"
 
