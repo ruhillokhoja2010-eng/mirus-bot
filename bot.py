@@ -1,295 +1,307 @@
+# -*- coding: utf-8 -*-
 import os
 import asyncio
 import logging
 import sqlite3
 import random
+import html
+import ast
+import operator
+
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile
-from thefuzz import process
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, CallbackQuery)
 from aiohttp import web
 
-# ==========================================
-# НАСТРОЙКИ
-# ==========================================
-TOKEN = "8644786361:AAEwDgQxcDUJ5i2E2M-E6ChiocPHeT3pUi8"  
-ADMIN_ID = 7306883771        
+from knowledge import ENTRIES, LANGS, DEFAULT_LANG, TEXTS, t, find_answer, entry_answer
 
+# ==========================================
+# НАСТРОЙКИ (берутся из Environment на Render)
+# ==========================================
+TOKEN = os.environ["8644786361:AAEwDgQxc-DUJ5i2E2M-E6ChiocPHeT3pUi8"]
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "7306883771"))
+MINI_APP_URL = os.environ.get("MINI_APP_URL", "https://mirus-app.onrender.com")
+DB = "mirus_knowledge.db"
+
+logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-logging.basicConfig(level=logging.INFO)
-
-class UserState(StatesGroup):
-    active_chat = State()
-
 # ==========================================
-# ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ SQLITE
+# БАЗА ДАННЫХ
 # ==========================================
+def db():
+    return sqlite3.connect(DB)
+
 def init_db():
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS knowledge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT,
-            question_key TEXT,
-            answer TEXT,
-            lang TEXT
-        )
-    """)
-    
-    # Таблица для личных заметок
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            note_text TEXT
-        )
-    """)
-    
-    cursor.execute("SELECT COUNT(*) FROM knowledge")
-    if cursor.fetchone()[0] == 0:
-        initial_data = [
-            # Приветствия и роль личного помощника
-            ("приветствие", "привет", "👋 Привет! Я Mirus AI— твой личный помощник . Я готов помочь с учебой, распланировать задачи или просто выслушать, если ты устал.", "ru"),
-            ("приветствие", "здравствуйте", "Здравствуйте! Рад нашему общению. Чем могу помочь вам сегодня в качестве личного помощника?", "ru"),
-            ("помощник", "что ты умеешь", "🤖 Я твой Mirus AI — личный помощник. Я умею:\n• Отвечать на учебные вопросы (физика, алгебра, история);\n• Работать как личный психолог и поддерживать беседу;\n• Вести твои личные заметки (`/note`);\n• Считать (`/calc`), проводить викторины (`/quiz`) и многое другое!", "ru"),
-            
-            # Психологическая поддержка и эмпатия
-            ("психология", "я устал", "😔 Понимаю тебя. Учёба и постоянные дела отнимают много сил. Попробуй сделать небольшую паузу, выпить воды, подышать свежим воздухом или просто отвлечься на 15 минут. Ты отлично справляешься!", "ru"),
-            ("психология", "мне грустно", "🫂 Мне жаль, что тебе грустно. Помни, что трудные периоды — это временное явление. Если хочешь выговориться или разобрать какую-то задачу вместе, я всегда здесь.", "ru"),
-            ("психология", "стресс перед экзаменом", "🧠 Волнение перед важными событиями — это абсолютно нормально. Главное — дыши глубоко и верь в свои силы. Давай повторим нужную тему через поиск или мини-викторину (`/quiz`), чтобы обрести уверенность!", "ru"),
-            ("психология", "как мотивировать себя", "🔥 Мотивация приходит во время действия! Начни с малого: поставь одну простую задачу, разбей её на шаги и сделай первый. У тебя всё получится, я в тебя верю!", "ru"),
-
-            # Базовые учебные темы
-            ("история", "история таджикистана", "🏛 **История Таджикистана:**\n• Государства Бактрия, Согд, Кушанидов и Саманидов (IX-X вв.).\n• Образование Таджикской ССР (1924).\n• Независимость: 9 сентября 1991 года.", "ru"),
-            ("география", "география таджикистана", "🌍 **География:** Столица — Душанбе. 93% территории занимают горы (Памир, Тянь-Шань). Высочайшая точка — пик Исмоили Сомони (7495 м).", "ru"),
-            ("физика", "второй закон ньютона", "⚡ **Второй закон Ньютона:** $F = m \\cdot a$ (Сила равна произведению массы на ускорение).", "ru"),
-            ("алгебра", "дискриминант", "📐 **Дискриминант:** Для квадратного уравнения $ax^2 + bx + c = 0$ формула: $D = b^2 - 4ac$.", "ru"),
-        ]
-        cursor.executemany(
-            "INSERT INTO knowledge (category, question_key, answer, lang) VALUES (?, ?, ?, ?)",
-            initial_data
-        )
-        conn.commit()
+    conn = db()
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS knowledge (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT, question_key TEXT, answer TEXT, lang TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER, note_text TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY, lang TEXT)""")
+    conn.commit()
     conn.close()
 
 init_db()
 
-# ==========================================
-# ОБРАБОТЧИКИ КОМАНД
-# ==========================================
+def get_lang(user_id, tg_code=None):
+    conn = db(); c = conn.cursor()
+    c.execute("SELECT lang FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0] in LANGS:
+        return row[0]
+    if tg_code:
+        code = tg_code.split("-")[0].lower()
+        if code in LANGS:
+            return code
+    return DEFAULT_LANG
 
-@dp.message(Command("start"))
+def set_lang(user_id, lang):
+    conn = db(); c = conn.cursor()
+    c.execute("INSERT INTO users (user_id, lang) VALUES (?, ?) "
+              "ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang", (user_id, lang))
+    conn.commit(); conn.close()
+
+def extra_entries():
+    """Записи, добавленные админом через /add (хранятся в базе)."""
+    conn = db(); c = conn.cursor()
+    c.execute("SELECT category, question_key, answer, lang FROM knowledge")
+    rows = c.fetchall()
+    conn.close()
+    out = []
+    for cat, key, ans, lg in rows:
+        lg = lg if lg in LANGS else DEFAULT_LANG
+        out.append({"cat": cat, "keys": {lg: [key]}, "ans": {lg: ans}})
+    return out
+
+def count(sql, params=()):
+    conn = db(); c = conn.cursor()
+    c.execute(sql, params)
+    n = c.fetchone()[0]
+    conn.close()
+    return n
+
+# ==========================================
+# ВСПОМОГАТЕЛЬНЫЕ
+# ==========================================
+def lang_keyboard(prefix="setlang"):
+    rows = [[InlineKeyboardButton(text=name, callback_data=f"{prefix}:{code}")]
+            for code, name in LANGS.items()]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def main_keyboard(lang):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t("open_app", lang), web_app=WebAppInfo(url=MINI_APP_URL))],
+        [InlineKeyboardButton(text="🌐 " + LANGS[lang].split(" ", 1)[1], callback_data="lang_menu"),
+         InlineKeyboardButton(text="❓ /help", callback_data="help")],
+    ])
+
+def arg_of(message: types.Message, cmd: str) -> str:
+    return (message.text or "").replace(cmd, "", 1).strip()
+
+ALLOWED_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+               ast.Div: operator.truediv, ast.USub: operator.neg, ast.UAdd: operator.pos}
+
+def safe_eval(expr: str):
+    def ev(node):
+        if isinstance(node, ast.Expression):
+            return ev(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in ALLOWED_OPS:
+            return ALLOWED_OPS[type(node.op)](ev(node.left), ev(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in ALLOWED_OPS:
+            return ALLOWED_OPS[type(node.op)](ev(node.operand))
+        raise ValueError("bad expression")
+    return ev(ast.parse(expr, mode="eval"))
+
+# ==========================================
+# КОМАНДЫ
+# ==========================================
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    set_lang(message.from_user.id, lang)
+    name = html.escape(message.from_user.first_name or "друг")
+    await message.answer(t("welcome", lang, name=name), reply_markup=main_keyboard(lang))
+
 @dp.message(Command("help"))
-async def cmd_start_help(message: types.Message, state: FSMContext):
-    await state.set_state(UserState.active_chat)
-    help_text = (
-        "🤖 **Привет! Я Mirus AI** — твой умный личный помощник и друг.\n\n"
-        "💬 *Ты можешь просто написать мне о своих делах, спросить совет, поделиться усталостью или задать учебный вопрос.*\n\n"
-        "📖 **Основные команды:**\n"
-        "• `/list` — Все темы в базе\n"
-        "• `/search <слово>` — Точный поиск\n"
-        "• `/random` — Случайный факт\n"
-        "• `/quiz` — Викторина\n"
-        "• `/calc <пример>` — Калькулятор\n"
-        "• `/note <текст>` — Сохранить личную заметку\n"
-        "• `/mynotes` — Мои заметки\n"
-        "• `/suggest <текст>` — Предложить тему админу\n"
-        "• `/stats` — Статистика базы"
-    )
-    await message.answer(help_text, parse_mode="Markdown")
+async def cmd_help(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    await message.answer(t("help", lang), parse_mode="HTML")
+
+@dp.message(Command("lang"))
+async def cmd_lang(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    await message.answer(t("lang_choose", lang), reply_markup=lang_keyboard())
+
+@dp.callback_query(F.data == "lang_menu")
+async def cb_lang_menu(callback: CallbackQuery):
+    lang = get_lang(callback.from_user.id, callback.from_user.language_code)
+    await callback.message.answer(t("lang_choose", lang), reply_markup=lang_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "help")
+async def cb_help(callback: CallbackQuery):
+    lang = get_lang(callback.from_user.id, callback.from_user.language_code)
+    await callback.message.answer(t("help", lang), parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("setlang:"))
+async def cb_setlang(callback: CallbackQuery):
+    code = callback.data.split(":", 1)[1]
+    if code not in LANGS:
+        await callback.answer()
+        return
+    set_lang(callback.from_user.id, code)
+    await callback.message.answer(t("lang_set", code, lang=LANGS[code]), reply_markup=main_keyboard(code))
+    await callback.answer()
 
 @dp.message(Command("list"))
-async def cmd_list_knowledge(message: types.Message):
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT category, question_key FROM knowledge ORDER BY category ASC")
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        await message.answer("📂 База знаний пуста.")
-        return
-
-    categories = {}
-    for category, question_key in rows:
-        cat_title = category.capitalize()
-        if cat_title not in categories:
-            categories[cat_title] = []
-        categories[cat_title].append(question_key)
-
-    response_text = "📚 **Список тем и категорий Mirus AI:**\n\n"
-    for cat, keys in categories.items():
-        response_text += f"📂 **{cat}:**\n"
-        for key in keys:
-            response_text += f"  • `{key}`\n"
-        response_text += "\n"
-    await message.answer(response_text, parse_mode="Markdown")
+async def cmd_list(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    cats = {}
+    for e in list(ENTRIES) + extra_entries():
+        title = e["cat"].capitalize()
+        keys = e["keys"].get(lang) or e["keys"].get(DEFAULT_LANG) or next(iter(e["keys"].values()))
+        cats.setdefault(title, []).append(keys[0])
+    lines = []
+    for cat, keys in cats.items():
+        lines.append(f"<b>📂 {html.escape(cat)}</b>")
+        lines += [f"  • {html.escape(k)}" for k in keys[:12]]
+        lines.append("")
+    await message.answer("\n".join(lines) or t("not_found", lang), parse_mode="HTML")
 
 @dp.message(Command("search"))
 async def cmd_search(message: types.Message):
-    query = message.text.replace("/search", "", 1).strip().lower()
-    if not query:
-        await message.answer("⚠️ Укажи слово: `/search устал` или `/search ньютона`", parse_mode="Markdown")
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    q = arg_of(message, "/search").lower()
+    if not q:
+        await message.answer(t("search_usage", lang))
         return
-
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT question_key, answer FROM knowledge WHERE question_key LIKE ? OR answer LIKE ?", (f"%{query}%", f"%{query}%"))
-    results = cursor.fetchall()
-    conn.close()
-
-    if not results:
-        await message.answer(f"❌ Ничего не найдено по запросу `'{query}'`.", parse_mode="Markdown")
-        return
-
-    response_text = f"🔍 **Результаты поиска:** `'{query}'`\n\n"
-    for key, answer in results:
-        response_text += f"🔑 **Ключ:** `{key}`\n{answer}\n\n"
-    await message.answer(response_text, parse_mode="Markdown")
+    ans, score = find_answer(q, lang, extra_entries())
+    if ans:
+        await message.answer(ans)
+    else:
+        await message.answer(t("search_none", lang, q=html.escape(q)), parse_mode="HTML")
 
 @dp.message(Command("random"))
 async def cmd_random(message: types.Message):
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT question_key, answer, category FROM knowledge")
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        await message.answer("📂 База пуста.")
-        return
-
-    key, answer, category = random.choice(rows)
-    await message.answer(f"🎲 **Тема:** `{key.capitalize()}` (*{category.capitalize()}*)\n\n{answer}", parse_mode="Markdown")
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    pool = list(ENTRIES) + extra_entries()
+    e = random.choice(pool)
+    key = (e["keys"].get(lang) or e["keys"].get(DEFAULT_LANG) or next(iter(e["keys"].values())))[0]
+    await message.answer(f"{t('random_title', lang)}: <b>{html.escape(key.capitalize())}</b>\n\n"
+                         f"{html.escape(entry_answer(e, lang))}", parse_mode="HTML")
 
 @dp.message(Command("calc"))
 async def cmd_calc(message: types.Message):
-    expr = message.text.replace("/calc", "", 1).strip()
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    expr = arg_of(message, "/calc")
     if not expr:
-        await message.answer("⚠️ Пример: `/calc 50 * 2 + 15`", parse_mode="Markdown")
+        await message.answer(t("calc_usage", lang))
         return
     try:
-        if not all(c in "0123456789+-*/(). " for c in expr):
-            await message.answer("❌ Только цифры и базовые знаки мат. операторов.")
-            return
-        res = eval(expr)
-        await message.answer(f"🧮 `{expr} = {res}`", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка вычисления.")
+        res = safe_eval(expr)
+        await message.answer(f"🧮 {html.escape(expr)} = <b>{res}</b>", parse_mode="HTML")
+    except Exception:
+        await message.answer(t("calc_error", lang))
 
 @dp.message(Command("note"))
 async def cmd_note(message: types.Message):
-    text = message.text.replace("/note", "", 1).strip()
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    text = arg_of(message, "/note")
     if not text:
-        await message.answer("⚠️ Напиши текст заметки: `/note Купить тетрадь`", parse_mode="Markdown")
+        await message.answer(t("note_usage", lang))
         return
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO notes (user_id, note_text) VALUES (?, ?)", (message.from_user.id, text))
-    conn.commit()
-    conn.close()
-    await message.answer("📝 Заметка успешно сохранена в твой блокнот!")
+    conn = db(); c = conn.cursor()
+    c.execute("INSERT INTO notes (user_id, note_text) VALUES (?, ?)", (message.from_user.id, text))
+    conn.commit(); conn.close()
+    await message.answer(t("note_saved", lang))
 
 @dp.message(Command("mynotes"))
 async def cmd_mynotes(message: types.Message):
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT note_text FROM notes WHERE user_id = ?", (message.from_user.id,))
-    rows = cursor.fetchall()
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    conn = db(); c = conn.cursor()
+    c.execute("SELECT note_text FROM notes WHERE user_id = ? ORDER BY id", (message.from_user.id,))
+    rows = c.fetchall()
     conn.close()
-
     if not rows:
-        await message.answer("📂 У тебя нет сохраненных заметок. Используй `/note`.")
+        await message.answer(t("mynotes_empty", lang))
         return
+    body = "\n".join(f"{i}. {html.escape(r[0])}" for i, r in enumerate(rows, 1))
+    await message.answer(f"<b>{t('mynotes_title', lang)}</b>\n\n{body}", parse_mode="HTML")
 
-    text = "📋 **Твои заметки:**\n\n"
-    for i, r in enumerate(rows, 1):
-        text += f"{i}. {r[0]}\n"
-    await message.answer(text, parse_mode="Markdown")
+@dp.message(Command("suggest"))
+async def cmd_suggest(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    text = arg_of(message, "/suggest")
+    if not text:
+        await message.answer(t("suggest_usage", lang))
+        return
+    who = message.from_user.username or str(message.from_user.id)
+    await bot.send_message(ADMIN_ID, f"💡 Предложение от @{who}:\n{text}")
+    await message.answer(t("suggest_sent", lang))
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM knowledge")
-    total = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM notes")
-    notes_total = cursor.fetchone()[0]
-    conn.close()
-    await message.answer(f"📊 **Статистика Mirus AI:**\n• Записей в базе: `{total}`\n• Заметок пользователей: `{notes_total}`", parse_mode="Markdown")
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    total = count("SELECT COUNT(*) FROM knowledge") + len(ENTRIES)
+    notes = count("SELECT COUNT(*) FROM notes")
+    users = count("SELECT COUNT(*) FROM users")
+    await message.answer(t("stats", lang, total=total, notes=notes, users=users))
 
-# Админ-команды
+# ---------- админ ----------
 @dp.message(Command("add"))
 async def cmd_add(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Нет прав.")
+        await message.answer(t("admin_only", lang))
         return
-    parts = message.text.replace("/add", "", 1).split("|")
+    parts = arg_of(message, "/add").split("|")
     if len(parts) < 3:
-        await message.answer("⚠️ Формат: `/add категория | ключ | ответ`", parse_mode="Markdown")
+        await message.answer("Формат: /add категория | ключ | ответ")
         return
     cat, key, ans = parts[0].strip().lower(), parts[1].strip().lower(), parts[2].strip()
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO knowledge (category, question_key, answer, lang) VALUES (?, ?, ?, ?)", (cat, key, ans, "ru"))
-    conn.commit()
-    conn.close()
-    await message.answer(f"✅ Добавлено: `{key}` в категорию `{cat}`", parse_mode="Markdown")
+    conn = db(); c = conn.cursor()
+    c.execute("INSERT INTO knowledge (category, question_key, answer, lang) VALUES (?, ?, ?, ?)",
+              (cat, key, ans, DEFAULT_LANG))
+    conn.commit(); conn.close()
+    await message.answer(f"✅ Добавлено: {key} ({cat})")
 
 @dp.message(Command("delete"))
 async def cmd_delete(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Нет прав.")
+        await message.answer(t("admin_only", lang))
         return
-    key = message.text.replace("/delete", "", 1).strip().lower()
+    key = arg_of(message, "/delete").lower()
     if not key:
-        await message.answer("⚠️ Укажи ключ: `/delete привет`")
+        await message.answer("Укажите ключ: /delete ключ")
         return
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM knowledge WHERE question_key = ?", (key,))
-    conn.commit()
-    conn.close()
-    await message.answer(f"🗑 Удалено: `{key}`", parse_mode="Markdown")
+    conn = db(); c = conn.cursor()
+    c.execute("DELETE FROM knowledge WHERE question_key = ?", (key,))
+    conn.commit(); conn.close()
+    await message.answer(f"🗑 Удалено: {key}")
 
-# ==========================================
-# ИНТЕЛЛЕКТУАЛЬНЫЙ ПОИСК И ПСИХОЛОГ-РЕЖИМ
-# ==========================================
-@dp.message(UserState.active_chat)
-async def smart_search(message: types.Message):
-    query = message.text.lower().strip()
-    conn = sqlite3.connect("mirus_knowledge.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT question_key, answer FROM knowledge")
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        await message.answer("⚠️ База пуста.")
-        return
-
-    keys = [r[0] for r in rows]
-    answers = {r[0]: r[1] for r in rows}
-    match, score = process.extractOne(query, keys)
-
-    # Если бот уверен в совпадении (>55%), выдает ответ из базы (учёба, приветствие или психология)
-    if score >= 55:
-        await message.answer(answers[match], parse_mode="Markdown")
+# ---------- обычные сообщения ----------
+@dp.message(F.text & ~F.text.startswith("/"))
+async def chat(message: types.Message):
+    lang = get_lang(message.from_user.id, message.from_user.language_code)
+    ans, score = find_answer(message.text, lang, extra_entries())
+    if ans:
+        await message.answer(ans)
     else:
-        # Мягкий ответ психолога/помощника, если фраза незнакома
-        await message.answer(
-            "💭 Я внимательно тебя слушаю, но пока не до конца понял этот запрос.\n"
-            "Ты можешь написать `/help` для списка команд или добавить эту мысль/тему в базу через администратора!",
-            parse_mode="Markdown"
-        )
+        await message.answer(t("not_found", lang))
 
 # ==========================================
-# ВЕБ-СЕРВЕР ДЛЯ RENDER (24/7)
+# ВЕБ-СЕРВЕР ДЛЯ RENDER
 # ==========================================
 async def handle_ping(request):
     return web.Response(text="Mirus AI is running!")
@@ -300,11 +312,10 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
 
 async def main():
-    print("Mirus AI (Личный помощник и психолог) успешно запущен...")
+    logging.info("Mirus AI запущен")
     asyncio.create_task(start_web_server())
     await dp.start_polling(bot)
 
