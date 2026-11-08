@@ -14,11 +14,12 @@ from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup, WebAppInf
 from aiohttp import web
 
 from knowledge import ENTRIES, LANGS, DEFAULT_LANG, TEXTS, t, find_answer, entry_answer
+import calc as calculator
 
 # ==========================================
 # НАСТРОЙКИ (берутся из Environment на Render)
 # ==========================================
-TOKEN = os.environ["8644786361:AAEwDgQxc-DUJ5i2E2M-E6ChiocPHeT3pUi8"]
+TOKEN = os.environ["8644786361:AAEwDgQxc-DUJ5i2E2M-E6ChiocPHeT3pUi8 "]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "7306883771"))
 MINI_APP_URL = os.environ.get("MINI_APP_URL", "https://mirus-app.onrender.com")
 DB = "mirus_knowledge.db"
@@ -105,21 +106,23 @@ def main_keyboard(lang):
 def arg_of(message: types.Message, cmd: str) -> str:
     return (message.text or "").replace(cmd, "", 1).strip()
 
-ALLOWED_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
-               ast.Div: operator.truediv, ast.USub: operator.neg, ast.UAdd: operator.pos}
+CALC_STATE = {}   # user_id -> текущее выражение кнопочного калькулятора
 
-def safe_eval(expr: str):
-    def ev(node):
-        if isinstance(node, ast.Expression):
-            return ev(node.body)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return node.value
-        if isinstance(node, ast.BinOp) and type(node.op) in ALLOWED_OPS:
-            return ALLOWED_OPS[type(node.op)](ev(node.left), ev(node.right))
-        if isinstance(node, ast.UnaryOp) and type(node.op) in ALLOWED_OPS:
-            return ALLOWED_OPS[type(node.op)](ev(node.operand))
-        raise ValueError("bad expression")
-    return ev(ast.parse(expr, mode="eval"))
+def keypad_markup(expr: str):
+    rows = []
+    for row in calculator.keypad_labels():
+        rows.append([InlineKeyboardButton(text=b, callback_data=f"calc:{b}") for b in row])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def keypad_text(expr: str, error: bool = False) -> str:
+    shown = html.escape(calculator.display(expr))
+    prev = calculator.preview(expr)
+    lines = [f"🧮 <b>Калькулятор</b>", "", f"<code>{shown}</code>"]
+    if error:
+        lines.append("❌ Неверное выражение")
+    elif prev is not None and expr and prev != calculator.display(expr):
+        lines.append(f"= <b>{html.escape(prev)}</b>")
+    return "\n".join(lines)
 
 # ==========================================
 # КОМАНДЫ
@@ -208,10 +211,28 @@ async def cmd_calc(message: types.Message):
         await message.answer(t("calc_usage", lang))
         return
     try:
-        res = safe_eval(expr)
-        await message.answer(f"🧮 {html.escape(expr)} = <b>{res}</b>", parse_mode="HTML")
-    except Exception:
+        res = calculator.fmt(calculator.evaluate(expr))
+        await message.answer(f"🧮 {html.escape(calculator.pretty(calculator.normalize(expr)))} = <b>{html.escape(res)}</b>", parse_mode="HTML")
+    except ValueError:
         await message.answer(t("calc_error", lang))
+
+@dp.message(Command("calculator"))
+async def cmd_calculator(message: types.Message):
+    CALC_STATE[message.from_user.id] = ""
+    await message.answer(keypad_text(""), reply_markup=keypad_markup(""), parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("calc:"))
+async def cb_calc(callback: CallbackQuery):
+    key = callback.data.split(":", 1)[1]
+    uid = callback.from_user.id
+    expr = CALC_STATE.get(uid, "")
+    expr, error = calculator.press(expr, key)
+    CALC_STATE[uid] = expr
+    try:
+        await callback.message.edit_text(keypad_text(expr, error), reply_markup=keypad_markup(expr), parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer()
 
 @dp.message(Command("note"))
 async def cmd_note(message: types.Message):
@@ -294,6 +315,13 @@ async def cmd_delete(message: types.Message):
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chat(message: types.Message):
     lang = get_lang(message.from_user.id, message.from_user.language_code)
+    if calculator.is_arithmetic(message.text):
+        try:
+            res = calculator.fmt(calculator.evaluate(message.text))
+            await message.answer(f"🧮 {html.escape(calculator.pretty(calculator.normalize(message.text)))} = <b>{html.escape(res)}</b>", parse_mode="HTML")
+            return
+        except ValueError:
+            pass
     ans, score = find_answer(message.text, lang, extra_entries())
     if ans:
         await message.answer(ans)
